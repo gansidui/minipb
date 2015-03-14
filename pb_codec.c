@@ -1,4 +1,3 @@
-#include <string.h>
 #include "pb_codec.h"
 
 bool pb_encode_varint(pb_buffer_t *pb_buf, uint32_t field_number, uint64_t value) {
@@ -27,11 +26,33 @@ bool pb_decode_uint64(pb_buffer_t *pb_buf, void *dst) {
 }
 
 bool pb_decode_string(pb_buffer_t *pb_buf, uint8_t *dst, uint32_t dst_size, uint32_t *n) {
-
+	uint32_t len = 0;
+	if (!pb_decode_uint32(pb_buf, &len)) {
+		return false;
+	}
+	if (dst_size < len) {
+		return false;
+	}
+	*n = len;
+	
+	return pb_read(pb_buf, dst, len);
 }
 
 bool pb_decode_submsg(pb_buffer_t *pb_buf, pb_buffer_t *sub_pb_buf) {
+	uint32_t len = 0;
+	if (!pb_decode_uint32(pb_buf, &len)) {
+		return false;
+	}
+	if (pb_buf->buf_cap < pb_buf->offset + len) {
+		return false;
+	}
 
+	sub_pb_buf->buf = pb_buf->buf + pb_buf->offset;
+	sub_pb_buf->buf_cap = len;
+	sub_pb_buf->offset = 0;
+	pb_buf->offset += len;
+
+	return true;
 }
 
 bool pb_write(pb_buffer_t *pb_buf, const uint8_t *src, uint32_t n) {
@@ -51,7 +72,9 @@ bool pb_read(pb_buffer_t *pb_buf, uint8_t *dst, uint32_t n) {
 		return false;
 	}
 
-	memcpy(dst, pb_buf->buf + pb_buf->offset, n);
+	if (dst) {
+		memcpy(dst, pb_buf->buf + pb_buf->offset, n);
+	}
 	pb_buf->offset += n;
 
 	return true;
@@ -64,10 +87,17 @@ bool pb_encode_tag(pb_buffer_t *pb_buf, uint32_t field_number, pb_wire_type_t wi
 
 bool pb_encode_varint_with_no_field(pb_buffer_t *pb_buf, uint64_t value) {
 	uint8_t buf[10] = {0};
-	uint8_t i = 0;
+	uint32_t n = pb_encode_varint_to_buf(buf, value);
+	return pb_write(pb_buf, buf, n);
+}
+
+uint32_t pb_encode_varint_to_buf(uint8_t *dst, uint64_t value) {
+	uint8_t buf[10] = {0};
+	uint32_t i = 0;
 
 	if (0 == value) {
-		return pb_write(pb_buf, (uint8_t*)&value, 1);
+		memcpy(dst, (uint8_t*)&value, 1);
+		return 1;
 	}
 
 	while (value) {
@@ -75,8 +105,9 @@ bool pb_encode_varint_with_no_field(pb_buffer_t *pb_buf, uint64_t value) {
 		value >>= 7;
 	}
 	buf[i-1] &= 0x7F;
+	memcpy(dst, buf, i);
 
-	return pb_write(pb_buf, buf, i);
+	return i;
 }
 
 bool pb_decode_varint(pb_buffer_t *pb_buf, void *dst, uint32_t data_len) {
@@ -110,6 +141,7 @@ bool pb_decode_tag(pb_buffer_t *pb_buf, uint32_t *field_number, pb_wire_type_t *
 	*field_number = 0;
 	*wire_type = (pb_wire_type_t) 0;
 	*eof = false;
+
 	if (!pb_decode_uint32(pb_buf, &temp)) {
 		if (pb_buf->offset >= pb_buf->buf_cap) {
 			*eof = true;
@@ -125,4 +157,33 @@ bool pb_decode_tag(pb_buffer_t *pb_buf, uint32_t *field_number, pb_wire_type_t *
 	*wire_type = (pb_wire_type_t)(temp & 0x7);
 
 	return true;
+}
+
+bool pb_skip_varint(pb_buffer_t *pb_buf) {
+	uint8_t byte;
+	do {
+		if (!pb_read(pb_buf, &byte, 1)) {
+			return false;
+		}
+	} while(byte & 0x80);
+
+	return true;
+}
+
+bool pb_skip_string(pb_buffer_t *pb_buf) {
+	uint32_t len;
+	if (!pb_decode_uint32(pb_buf, &len)) {
+		return false;
+	}
+	return pb_read(pb_buf, NULL, len);
+}
+
+bool pb_skip_field(pb_buffer_t *pb_buf, pb_wire_type_t wire_type) {
+	switch (wire_type) {
+		case PB_WT_VARINT: return pb_skip_varint(pb_buf);
+		case PB_WT_64BIT:  return pb_read(pb_buf, NULL, 8);
+		case PB_WT_STRING: return pb_skip_string(pb_buf);
+		case PB_WT_32BIT:  return pb_read(pb_buf, NULL, 4);
+		default:           return false;
+	}
 }
